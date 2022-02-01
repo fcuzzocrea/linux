@@ -287,7 +287,6 @@ static int mpfs_gpio_probe(struct platform_device *pdev)
 
 	irq_c = &mpfs_gpio->gc.irq;
 	irq_c->chip = &mpfs_gpio_irqchip;
-	irq_c->chip->parent_device = dev;
 	irq_c->handler = handle_simple_irq;
 
 	ret = devm_irq_alloc_descs(&pdev->dev, -1, 0, ngpio, 0);
@@ -321,6 +320,7 @@ static int mpfs_gpio_probe(struct platform_device *pdev)
 	if (ret)
 		goto cleanup_clock;
 
+	irq_domain_set_pm_device(mpfs_gpio->gc.irq.domain, dev);
 	platform_set_drvdata(pdev, mpfs_gpio);
 	dev_info(dev, "Microchip MPFS GPIO registered %d GPIOs\n", ngpio);
 

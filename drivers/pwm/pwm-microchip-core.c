@@ -10,6 +10,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -29,18 +30,10 @@
 #define COREPWM_NEGEDGE_OFFSET	0x14u
 #define COREPWM_CHANNEL_OFFSET	0x08u
 
-struct mchp_core_pwm_registers {
-	u8 posedge;
-	u8 negedge;
-	u8 period_steps;
-	u8 prescale;
-};
-
 struct mchp_core_pwm_chip {
 	struct pwm_chip chip;
 	struct clk *clk;
 	void __iomem *base;
-	struct mchp_core_pwm_registers *regs;
 };
 
 static inline struct mchp_core_pwm_chip *to_mchp_core_pwm(struct pwm_chip *chip)
@@ -48,8 +41,7 @@ static inline struct mchp_core_pwm_chip *to_mchp_core_pwm(struct pwm_chip *chip)
 	return container_of(chip, struct mchp_core_pwm_chip, chip);
 }
 
-static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm,
-				 bool enable)
+static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm, bool enable)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	u8 channel_enable, reg_offset, shift;
@@ -69,12 +61,13 @@ static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm,
 	writel_relaxed(channel_enable, mchp_core_pwm->base + reg_offset);
 }
 
-static void mchp_core_pwm_calculate_duty(struct pwm_chip *chip,
-					 const struct pwm_state *desired_state,
-					 struct mchp_core_pwm_registers *regs)
+static void mchp_core_pwm_apply_duty(struct pwm_chip *chip, struct pwm_device *pwm,
+				     const struct pwm_state *state, u8 prescale)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
+	void __iomem *channel_base = mchp_core_pwm->base + pwm->hwpwm * COREPWM_CHANNEL_OFFSET;
 	u64 duty_steps, tmp;
+	u8 posedge, negedge;
 
 	/*
 	 * Calculate the duty cycle in multiples of the prescaled period:
@@ -82,42 +75,37 @@ static void mchp_core_pwm_calculate_duty(struct pwm_chip *chip,
 	 * step_in_ns = (prescale * NSEC_PER_SEC) / clk_rate
 	 * The code below is rearranged slightly to only divide once.
 	 */
-	duty_steps = desired_state->duty_cycle * clk_get_rate(mchp_core_pwm->clk);
-	tmp = PREG_TO_VAL(regs->prescale) * NSEC_PER_SEC;
+	duty_steps = state->duty_cycle * clk_get_rate(mchp_core_pwm->clk);
+	tmp = prescale * NSEC_PER_SEC;
 	duty_steps = div64_u64(duty_steps, tmp);
 
-	if (desired_state->polarity == PWM_POLARITY_INVERSED) {
-		regs->negedge = 0u;
-		regs->posedge = duty_steps;
+	if (state->polarity == PWM_POLARITY_INVERSED) {
+		negedge = 0u;
+		posedge = duty_steps;
 	} else {
-		regs->posedge = 0u;
-		regs->negedge = duty_steps;
+		posedge = 0u;
+		negedge = duty_steps;
 	}
+
+	writel_relaxed(posedge, channel_base + COREPWM_POSEDGE_OFFSET);
+	writel_relaxed(negedge, channel_base + COREPWM_NEGEDGE_OFFSET);
+
+	/*
+	 * Turn the output on unless posedge == negedge, in which case the
+	 * output is intended to be 0, but limitations of the IP block don't
+	 * allow a zero length duty cycle - so just turn it off.
+	 */
+	if (posedge == negedge)
+		mchp_core_pwm_enable(chip, pwm, false);
+	else
+		mchp_core_pwm_enable(chip, pwm, true);
 }
 
-static void mchp_core_pwm_apply_duty(const u8 channel,
-				     struct mchp_core_pwm_chip *pwm_chip,
-				     struct mchp_core_pwm_registers *regs)
-{
-	void __iomem *channel_base = pwm_chip->base + channel * COREPWM_CHANNEL_OFFSET;
-
-	writel_relaxed(regs->posedge, channel_base + COREPWM_POSEDGE_OFFSET);
-	writel_relaxed(regs->negedge, channel_base + COREPWM_NEGEDGE_OFFSET);
-}
-
-static void mchp_core_pwm_apply_period(struct mchp_core_pwm_chip *pwm_chip,
-				       struct mchp_core_pwm_registers *regs)
-{
-	writel_relaxed(regs->prescale, pwm_chip->base + COREPWM_PRESCALE_REG);
-	writel_relaxed(regs->period_steps, pwm_chip->base + COREPWM_PERIOD_REG);
-}
-
-static void mchp_core_pwm_calculate_base(struct pwm_chip *chip,
-					 const struct pwm_state *desired_state,
-					 u8 *period_steps_r, u8 *prescale_r)
+static u8 mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_state *state)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
-	u64 tmp = desired_state->period;
+	u64 tmp = state->period;
+	u8 prescale, period_steps;
 
 	/*
 	 * Calculate the period cycles and prescale values.
@@ -129,12 +117,17 @@ static void mchp_core_pwm_calculate_base(struct pwm_chip *chip,
 	do_div(tmp, NSEC_PER_SEC);
 
 	if (tmp > 0xFFFFu) {
-		*prescale_r = 0xFFu;
-		*period_steps_r = 0xFFu;
+		prescale = 0xFFu;
+		period_steps = 0xFFu;
 	} else {
-		*prescale_r = tmp >> 8;
-		*period_steps_r = tmp / PREG_TO_VAL(*prescale_r) - 1;
+		prescale = tmp >> 8;
+		period_steps = tmp / PREG_TO_VAL(prescale) - 1;
 	}
+
+	writel_relaxed(prescale, mchp_core_pwm->base + COREPWM_PRESCALE_REG);
+	writel_relaxed(period_steps, mchp_core_pwm->base + COREPWM_PERIOD_REG);
+
+	return prescale;
 }
 
 static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -142,8 +135,7 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	struct pwm_state current_state = pwm->state;
-	u8 period_steps_r, prescale_r;
-	u8 channel = pwm->hwpwm;
+	u8 prescale;
 
 	if (!state->enabled) {
 		mchp_core_pwm_enable(chip, pwm, false);
@@ -155,22 +147,12 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * we can shortcut the calculations and just compute/apply the new duty
 	 * cycle pos & neg edges
 	 */
-	if (!current_state.enabled || current_state.period != state->period) {
-		mchp_core_pwm_calculate_base(chip, state, &period_steps_r, &prescale_r);
-
-		mchp_core_pwm->regs->period_steps = period_steps_r;
-		mchp_core_pwm->regs->prescale = prescale_r;
-
-		mchp_core_pwm_apply_period(mchp_core_pwm, mchp_core_pwm->regs);
-	}
-
-	mchp_core_pwm_calculate_duty(chip, state, mchp_core_pwm->regs);
-	mchp_core_pwm_apply_duty(channel, mchp_core_pwm, mchp_core_pwm->regs);
-
-	if (mchp_core_pwm->regs->posedge == mchp_core_pwm->regs->negedge)
-		mchp_core_pwm_enable(chip, pwm, false);
+	if (!current_state.enabled || current_state.period != state->period)
+		prescale = mchp_core_pwm_apply_period(chip, state);
 	else
-		mchp_core_pwm_enable(chip, pwm, true);
+		prescale = readb_relaxed(mchp_core_pwm->base + COREPWM_PRESCALE_REG);
+
+	mchp_core_pwm_apply_duty(chip, pwm, state, prescale);
 
 	/*
 	 * Notify the block to update the waveform from the shadow registers.
@@ -235,10 +217,6 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 
 	mchp_pwm = devm_kzalloc(&pdev->dev, sizeof(*mchp_pwm), GFP_KERNEL);
 	if (!mchp_pwm)
-		return -ENOMEM;
-
-	mchp_pwm->regs = devm_kzalloc(&pdev->dev, sizeof(*regs), GFP_KERNEL);
-	if (!mchp_pwm->regs)
 		return -ENOMEM;
 
 	mchp_pwm->base = devm_platform_get_and_ioremap_resource(pdev, 0, &regs);

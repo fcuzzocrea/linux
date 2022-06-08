@@ -191,7 +191,7 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 	posedge = readb_relaxed(channel_base + COREPWM_POSEDGE_OFFSET);
 	negedge = readb_relaxed(channel_base + COREPWM_NEGEDGE_OFFSET);
 
-	duty_steps = abs((s8)posedge - (s8)negedge);
+	duty_steps = abs((s16)posedge - (s16)negedge);
 	state->polarity = negedge < posedge ? PWM_POLARITY_INVERSED : PWM_POLARITY_NORMAL;
 
 	prescale = readb_relaxed(mchp_core_pwm->base + COREPWM_PRESCALE_REG);

@@ -177,7 +177,6 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 				    struct pwm_state *state)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
-	u64 clk_period = NSEC_PER_SEC;
 	u8 prescale, period_steps, duty_steps;
 	u8 posedge, negedge;
 	u16 channel_enabled;
@@ -185,23 +184,30 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 	channel_enabled = (((u16)readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(1)) << 8) |
 		readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(0)));
 
-	posedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_POSEDGE(pwm->hwpwm));
-	negedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_NEGEDGE(pwm->hwpwm));
-
-	duty_steps = abs((s16)posedge - (s16)negedge);
-	state->polarity = negedge < posedge ? PWM_POLARITY_INVERSED : PWM_POLARITY_NORMAL;
-
-	prescale = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PRESCALE);
-	period_steps = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PERIOD);
-
-	do_div(clk_period, clk_get_rate(mchp_core_pwm->clk));
-	state->duty_cycle = PREG_TO_VAL(prescale) * clk_period * duty_steps;
-	state->period = PREG_TO_VAL(prescale) * clk_period * PREG_TO_VAL(period_steps);
-
 	if (channel_enabled & 1 << pwm->hwpwm)
 		state->enabled = true;
 	else
 		state->enabled = false;
+
+	prescale = PREG_TO_VAL(readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PRESCALE));
+
+	period_steps = PREG_TO_VAL(readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PERIOD));
+	state->period = period_steps * prescale * NSEC_PER_SEC;
+	state->period = DIV64_U64_ROUND_UP(state->period, clk_get_rate(mchp_core_pwm->clk));
+
+	posedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_POSEDGE(pwm->hwpwm));
+	negedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_NEGEDGE(pwm->hwpwm));
+
+	if (negedge == posedge) {
+		state->duty_cycle = state->period / 2;
+	} else {
+		duty_steps = abs((s16)posedge - (s16)negedge);
+		state->duty_cycle = duty_steps * prescale * NSEC_PER_SEC;
+		state->duty_cycle = DIV64_U64_ROUND_UP(state->duty_cycle,
+						       clk_get_rate(mchp_core_pwm->clk));
+	}
+
+	state->polarity = negedge < posedge ? PWM_POLARITY_INVERSED : PWM_POLARITY_NORMAL;
 }
 
 static const struct pwm_ops mchp_core_pwm_ops = {

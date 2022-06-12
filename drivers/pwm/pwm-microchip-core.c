@@ -84,22 +84,35 @@ static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm, 
 }
 
 static void mchp_core_pwm_apply_duty(struct pwm_chip *chip, struct pwm_device *pwm,
-				     const struct pwm_state *state, u8 prescale)
+				     const struct pwm_state *state, u8 prescale, u8 period_steps)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	void __iomem *channel_base = mchp_core_pwm->base + pwm->hwpwm * COREPWM_CHANNEL_OFFSET;
-	u64 duty_steps, tmp;
+	u64 duty_steps, period, tmp;
 	u8 posedge, negedge;
+	u8 prescale_val = PREG_TO_VAL(prescale);
+	u8 period_steps_val = PREG_TO_VAL(period_steps);
+
+	period = period_steps_val * prescale_val * NSEC_PER_SEC;
+	period = div64_u64(period, clk_get_rate(mchp_core_pwm->clk));
 
 	/*
 	 * Calculate the duty cycle in multiples of the prescaled period:
 	 * duty_steps = duty_in_ns / step_in_ns
 	 * step_in_ns = (prescale * NSEC_PER_SEC) / clk_rate
 	 * The code below is rearranged slightly to only divide once.
+	 *
+	 * Because the period is per channel, it is possible that the requested
+	 * duty cycle is longer than the period, in which case cap it to the
+	 * period.
 	 */
-	duty_steps = state->duty_cycle * clk_get_rate(mchp_core_pwm->clk);
-	tmp = prescale * NSEC_PER_SEC;
-	duty_steps = div64_u64(duty_steps, tmp);
+	if (state->duty_cycle > period) {
+		duty_steps = period_steps;
+	} else {
+		duty_steps = state->duty_cycle * clk_get_rate(mchp_core_pwm->clk);
+		tmp = prescale_val * NSEC_PER_SEC;
+		duty_steps = div64_u64(duty_steps, tmp);
+	}
 
 	if (state->polarity == PWM_POLARITY_INVERSED) {
 		negedge = 0u;
@@ -123,11 +136,11 @@ static void mchp_core_pwm_apply_duty(struct pwm_chip *chip, struct pwm_device *p
 		mchp_core_pwm_enable(chip, pwm, true);
 }
 
-static u8 mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_state *state)
+static void mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_state *state,
+				       u8 *prescale, u8 *period_steps)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	u64 tmp = state->period;
-	u8 prescale, period_steps;
 
 	/*
 	 * Calculate the period cycles and prescale values.
@@ -139,17 +152,15 @@ static u8 mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_sta
 	do_div(tmp, NSEC_PER_SEC);
 
 	if (tmp > 0xFFFFu) {
-		prescale = 0xFFu;
-		period_steps = 0xFFu;
+		*prescale = 0xFFu;
+		*period_steps = 0xFFu;
 	} else {
-		prescale = tmp >> 8;
-		period_steps = tmp / PREG_TO_VAL(prescale) - 1;
+		*prescale = tmp >> 8;
+		*period_steps = tmp / PREG_TO_VAL(*prescale) - 1;
 	}
 
-	writel_relaxed(prescale, mchp_core_pwm->base + COREPWM_PRESCALE_REG);
-	writel_relaxed(period_steps, mchp_core_pwm->base + COREPWM_PERIOD_REG);
-
-	return prescale;
+	writel_relaxed(*prescale, mchp_core_pwm->base + COREPWM_PRESCALE_REG);
+	writel_relaxed(*period_steps, mchp_core_pwm->base + COREPWM_PERIOD_REG);
 }
 
 static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -157,7 +168,9 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	struct pwm_state current_state = pwm->state;
-	u8 prescale;
+	bool period_locked;
+	u16 channel_enabled;
+	u8 prescale, period_steps;
 
 	if (!state->enabled) {
 		mchp_core_pwm_enable(chip, pwm, false);
@@ -168,13 +181,21 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * If the only thing that has changed is the duty cycle or the polarity,
 	 * we can shortcut the calculations and just compute/apply the new duty
 	 * cycle pos & neg edges
+	 * As all the channels share the same period, do not allow it to be
+	 * changed if any other channels are enabled.
 	 */
-	if (!current_state.enabled || current_state.period != state->period)
-		prescale = mchp_core_pwm_apply_period(chip, state);
-	else
-		prescale = readb_relaxed(mchp_core_pwm->base + COREPWM_PRESCALE_REG);
+	channel_enabled = (((u16)readb_relaxed(mchp_core_pwm->base + COREPWM_EN_HIGH_REG) << 8) |
+		readb_relaxed(mchp_core_pwm->base + COREPWM_EN_LOW_REG));
+	period_locked = channel_enabled & ~(1 << pwm->hwpwm);
 
-	mchp_core_pwm_apply_duty(chip, pwm, state, prescale);
+	if ((!current_state.enabled || current_state.period != state->period) && !period_locked) {
+		mchp_core_pwm_apply_period(chip, state, &prescale, &period_steps);
+	} else {
+		prescale = readb_relaxed(mchp_core_pwm->base + COREPWM_PRESCALE_REG);
+		period_steps = readb_relaxed(mchp_core_pwm->base + COREPWM_PERIOD_REG);
+	}
+
+	mchp_core_pwm_apply_duty(chip, pwm, state, prescale, period_steps);
 
 	/*
 	 * Notify the block to update the waveform from the shadow registers.

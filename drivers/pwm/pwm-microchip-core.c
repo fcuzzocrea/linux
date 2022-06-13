@@ -114,26 +114,22 @@ static void mchp_core_pwm_apply_duty(struct pwm_chip *chip, struct pwm_device *p
 		duty_steps = div64_u64(duty_steps, tmp);
 	}
 
+	/*
+	 * Turn the output on unless posedge == negedge, in which case the
+	 * duty is intended to be 0, but limitations of the IP block don't
+	 * allow a zero length duty cycle - so just set the max high/low time
+	 * respectively.
+	 */
 	if (state->polarity == PWM_POLARITY_INVERSED) {
-		negedge = 0u;
+		negedge = !duty_steps ? period_steps : 0u;
 		posedge = duty_steps;
 	} else {
-		posedge = 0u;
+		posedge = !duty_steps ? period_steps : 0u;
 		negedge = duty_steps;
 	}
 
 	writel_relaxed(posedge, channel_base + COREPWM_POSEDGE_OFFSET);
 	writel_relaxed(negedge, channel_base + COREPWM_NEGEDGE_OFFSET);
-
-	/*
-	 * Turn the output on unless posedge == negedge, in which case the
-	 * output is intended to be 0, but limitations of the IP block don't
-	 * allow a zero length duty cycle - so just turn it off.
-	 */
-	if (posedge == negedge)
-		mchp_core_pwm_enable(chip, pwm, false);
-	else
-		mchp_core_pwm_enable(chip, pwm, true);
 }
 
 static void mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_state *state,
@@ -206,6 +202,8 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		writel_relaxed(1U, mchp_core_pwm->base + COREPWM_SYNC_UPD_REG);
 		usleep_range(state->period, state->period * 2);
 	}
+
+	mchp_core_pwm_enable(chip, pwm, true);
 
 	return 0;
 }

@@ -152,7 +152,8 @@ static void mchp_core_pwm_apply_period(struct pwm_chip *chip, const struct pwm_s
 		*period_steps = 0xFFu;
 	} else {
 		*prescale = tmp >> 8;
-		*period_steps = tmp / PREG_TO_VAL(*prescale) - 1;
+		do_div(tmp, PREG_TO_VAL(*prescale));
+		*period_steps = tmp - 1;
 	}
 
 	writel_relaxed(*prescale, mchp_core_pwm->base + COREPWM_PRESCALE_REG);

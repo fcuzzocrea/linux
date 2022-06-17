@@ -34,6 +34,7 @@ struct mchp_core_pwm_chip {
 	struct pwm_chip chip;
 	struct clk *clk;
 	void __iomem *base;
+	u32 sync_update_mask;
 };
 
 static inline struct mchp_core_pwm_chip *to_mchp_core_pwm(struct pwm_chip *chip)
@@ -59,6 +60,13 @@ static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm, 
 	channel_enable |= (enable << shift);
 
 	writel_relaxed(channel_enable, mchp_core_pwm->base + reg_offset);
+
+	/*
+	 * Write to the sync update registers so that channels with shadow
+	 * registers will also get their enable update. This operation is a NOP
+	 * for channels without shadow registers.
+	 */
+	writel_relaxed(1U, mchp_core_pwm->base + COREPWM_SYNC_UPD_REG);
 }
 
 static void mchp_core_pwm_apply_duty(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -156,9 +164,13 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	/*
 	 * Notify the block to update the waveform from the shadow registers.
-	 * This is a NOP if shadow registers are not enabled.
+	 * The updated values will not appear on the bus until they have been
+	 * applied to the waveform at the beginning of the next period.
 	 */
-	writel_relaxed(1U, mchp_core_pwm->base + COREPWM_SYNC_UPD_REG);
+	if (mchp_core_pwm->sync_update_mask & (1 << pwm->hwpwm)) {
+		writel_relaxed(1U, mchp_core_pwm->base + COREPWM_SYNC_UPD_REG);
+		usleep_range(state->period, state->period * 2);
+	}
 
 	return 0;
 }
@@ -226,6 +238,10 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 	mchp_pwm->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(mchp_pwm->clk))
 		return PTR_ERR(mchp_pwm->clk);
+
+	if (of_property_read_u32(pdev->dev.of_node, "microchip,sync-update-mask",
+				 &mchp_pwm->sync_update_mask))
+		mchp_pwm->sync_update_mask = 0u;
 
 	ret = clk_prepare(mchp_pwm->clk);
 	if (ret)

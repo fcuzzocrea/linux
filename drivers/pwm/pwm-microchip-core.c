@@ -29,6 +29,7 @@
 #include <linux/io.h>
 #include <linux/math.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
@@ -45,6 +46,7 @@
 struct mchp_core_pwm_chip {
 	struct pwm_chip chip;
 	struct clk *clk;
+	struct mutex lock; /* protect the shared period */
 	void __iomem *base;
 	u32 sync_update_mask;
 };
@@ -194,8 +196,13 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	u8 prescale, period_steps, hw_prescale, hw_period_steps;
 	int ret;
 
+	ret = mutex_lock_interruptible(&mchp_core_pwm->lock);
+	if (ret)
+		return ret;
+
 	if (!state->enabled) {
 		mchp_core_pwm_enable(chip, pwm, false, current_state.period);
+		mutex_unlock(&mchp_core_pwm->lock);
 		return 0;
 	}
 
@@ -217,15 +224,19 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		hw_prescale = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PRESCALE);
 		hw_period_steps = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PERIOD);
 
-		if ((period_steps * prescale) < (hw_period_steps * hw_prescale))
+		if ((period_steps * prescale) < (hw_period_steps * hw_prescale)) {
+			mutex_unlock(&mchp_core_pwm->lock);
 			return -EINVAL;
+		}
 
 		prescale = hw_prescale;
 		period_steps = hw_period_steps;
 	} else if (!current_state.enabled || current_state.period != state->period) {
 		ret = mchp_core_pwm_calc_period(chip, state, &prescale, &period_steps);
-		if (ret)
+		if (ret) {
+			mutex_unlock(&mchp_core_pwm->lock);
 			return ret;
+		}
 		mchp_core_pwm_apply_period(mchp_core_pwm, prescale, period_steps);
 	} else {
 		prescale = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_PRESCALE);
@@ -246,6 +257,8 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	mchp_core_pwm_enable(chip, pwm, true, state->period);
 
+	mutex_unlock(&mchp_core_pwm->lock);
+
 	return 0;
 }
 
@@ -256,6 +269,11 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 	u8 prescale, period_steps, duty_steps;
 	u8 posedge, negedge;
 	u16 channel_enabled;
+	int ret;
+
+	ret = mutex_lock_interruptible(&mchp_core_pwm->lock);
+	if (ret)
+		return;
 
 	channel_enabled = (((u16)readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(1)) << 8) |
 		readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(0)));
@@ -284,6 +302,8 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 	}
 
 	state->polarity = negedge < posedge ? PWM_POLARITY_INVERSED : PWM_POLARITY_NORMAL;
+
+	mutex_unlock(&mchp_core_pwm->lock);
 }
 
 static const struct pwm_ops mchp_core_pwm_ops = {
@@ -322,6 +342,8 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 	if (of_property_read_u32(pdev->dev.of_node, "microchip,sync-update-mask",
 				 &mchp_pwm->sync_update_mask))
 		mchp_pwm->sync_update_mask = 0u;
+
+	mutex_init(&mchp_pwm->lock);
 
 	mchp_pwm->chip.dev = &pdev->dev;
 	mchp_pwm->chip.ops = &mchp_core_pwm_ops;

@@ -314,38 +314,22 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 	if (IS_ERR(mchp_pwm->base))
 		return PTR_ERR(mchp_pwm->base);
 
-	mchp_pwm->clk = devm_clk_get(&pdev->dev, NULL);
+	mchp_pwm->clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(mchp_pwm->clk))
-		return PTR_ERR(mchp_pwm->clk);
+		return dev_err_probe(&pdev->dev, PTR_ERR(mchp_pwm->clk),
+				     "failed to get PWM clock\n");
 
 	if (of_property_read_u32(pdev->dev.of_node, "microchip,sync-update-mask",
 				 &mchp_pwm->sync_update_mask))
 		mchp_pwm->sync_update_mask = 0u;
-
-	ret = clk_prepare_enable(mchp_pwm->clk);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "failed to prepare PWM clock\n");
 
 	mchp_pwm->chip.dev = &pdev->dev;
 	mchp_pwm->chip.ops = &mchp_core_pwm_ops;
 	mchp_pwm->chip.npwm = 16;
 
 	ret = devm_pwmchip_add(&pdev->dev, &mchp_pwm->chip);
-	if (ret < 0) {
-		clk_disable_unprepare(mchp_pwm->clk);
+	if (ret < 0)
 		return dev_err_probe(&pdev->dev, ret, "failed to add PWM chip\n");
-	}
-
-	platform_set_drvdata(pdev, mchp_pwm);
-
-	return 0;
-}
-
-static int mchp_core_pwm_remove(struct platform_device *pdev)
-{
-	struct mchp_core_pwm_chip *mchp_pwm = platform_get_drvdata(pdev);
-
-	clk_disable_unprepare(mchp_pwm->clk);
 
 	return 0;
 }
@@ -356,7 +340,6 @@ static struct platform_driver mchp_core_pwm_driver = {
 		.of_match_table = mchp_core_of_match,
 	},
 	.probe = mchp_core_pwm_probe,
-	.remove = mchp_core_pwm_remove,
 };
 module_platform_driver(mchp_core_pwm_driver);
 

@@ -53,6 +53,7 @@ struct mchp_core_pwm_chip {
 	struct mutex lock; /* protect the shared period */
 	void __iomem *base;
 	u32 sync_update_mask;
+	u16 channel_enabled;
 };
 
 static inline struct mchp_core_pwm_chip *to_mchp_core_pwm(struct pwm_chip *chip)
@@ -79,6 +80,8 @@ static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm,
 	channel_enable |= (enable << shift);
 
 	writel_relaxed(channel_enable, mchp_core_pwm->base + reg_offset);
+	mchp_core_pwm->channel_enabled &= ~BIT(pwm->hwpwm);
+	mchp_core_pwm->channel_enabled |= enable << pwm->hwpwm;
 
 	/*
 	 * Notify the block to update the waveform from the shadow registers.
@@ -197,7 +200,6 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	struct pwm_state current_state = pwm->state;
 	bool period_locked;
 	u64 duty_steps;
-	u16 channel_enabled;
 	u8 prescale, period_steps, hw_prescale, hw_period_steps;
 	int ret;
 
@@ -220,9 +222,7 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * If the period is locked, it may not be possible to use a period
 	 * less than that requested. In that case, we just abort.
 	 */
-	channel_enabled = (((u16)readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(1)) << 8) |
-		readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(0)));
-	period_locked = channel_enabled & ~(1 << pwm->hwpwm);
+	period_locked = mchp_core_pwm->channel_enabled & ~(1 << pwm->hwpwm);
 
 	if (period_locked) {
 		mchp_core_pwm_calc_period(chip, state, &prescale, &period_steps);
@@ -273,17 +273,13 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
 	u16 prescale;
 	u8 period_steps, duty_steps, posedge, negedge;
-	u16 channel_enabled;
 	int ret;
 
 	ret = mutex_lock_interruptible(&mchp_core_pwm->lock);
 	if (ret)
 		return;
 
-	channel_enabled = (((u16)readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(1)) << 8) |
-		readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(0)));
-
-	if (channel_enabled & (1 << pwm->hwpwm))
+	if (mchp_core_pwm->channel_enabled & (1 << pwm->hwpwm))
 		state->enabled = true;
 	else
 		state->enabled = false;

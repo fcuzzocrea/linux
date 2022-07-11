@@ -271,8 +271,8 @@ static void mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pw
 				    struct pwm_state *state)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
-	u8 prescale, period_steps, duty_steps;
-	u8 posedge, negedge;
+	u16 prescale;
+	u8 period_steps, duty_steps, posedge, negedge;
 	u16 channel_enabled;
 	int ret;
 

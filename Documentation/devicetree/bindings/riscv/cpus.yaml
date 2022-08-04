@@ -77,6 +77,8 @@ properties:
     enum:
       - rv64imac
       - rv64imafdc
+      - rv64imafdch
+      - rv64imafdch_zicsr_zifencei_zba_zbb_zbc_zbs
 
   # RISC-V requires 'timebase-frequency' in /cpus, so disallow it here
   timebase-frequency: false

@@ -71,6 +71,23 @@ properties:
   msi-parent:
     description: MSI controller the device is capable of using.
 
+  microchip,axi-master-address-offset:
+    description: |
+      Depending on the FPGA bitstream, the AXIM address translation tables in
+      the PCIe controllers bridge layer may need to be configured. Use this
+      property to set the address offsets. There are a total of 6 master-side
+      address translation tables available for 32 bit address translation in
+      endpoint mode, each handling a single BAR. For 64 bit addresses each
+      translation table handles a pair of BARs and the odd numbered tables are
+      not used. For root port mode, only 64-bit mode is used and tables 0 & 1
+      can be used independantly.
+      For more information, see Section 1.3.3,
+      "PCIe/AXI4 Address Translation" of the PolarFire SoC PCIe User Guide:
+      https://www.microsemi.com/document-portal/doc_download/1245812-polarfire-fpga-and-polarfire-soc-fpga-pci-express-user-guide
+      The items in the matrix represent 64 bit addresses used in root port mode.
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    maxItems: 2
+
   interrupt-controller:
     type: object
     properties:
